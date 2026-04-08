@@ -156,7 +156,7 @@ def run_task(env, client: OpenAI, task_id: int) -> float:
 
     rewards: List[float] = []
     step_count = 0
-    score = 0.0
+    score = 0.01
     success = False
 
     log_start(task=task_name, env=BENCHMARK, model=MODEL_NAME)
@@ -169,7 +169,7 @@ def run_task(env, client: OpenAI, task_id: int) -> float:
             # Free state query (not logged as a step)
             state = env.call_tool("get_team_summary")
             if state.get("done"):
-                score = state.get("grader_score", 0.0)
+                score = state.get("grader_score", 0.01)
                 break
 
             env_step = state.get("action_count", 0)
@@ -220,7 +220,7 @@ def run_task(env, client: OpenAI, task_id: int) -> float:
             if tool_name in ("get_team_summary", "get_market_ledger"):
                 consecutive_info += 1
                 if consecutive_info >= 15:
-                    score = state.get("grader_score", 0.0)
+                    score = state.get("grader_score", 0.01)
                     break
                 continue
 
@@ -241,7 +241,7 @@ def run_task(env, client: OpenAI, task_id: int) -> float:
 
             # Budget exhaustion early exit
             if "Insufficient budget" in str(result.get("message", "")):
-                score = result.get("grader_score", state.get("grader_score", 0.0))
+                score = result.get("grader_score", state.get("grader_score", 0.01))
                 break
 
         success = score >= SUCCESS_THRESHOLD
