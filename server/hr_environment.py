@@ -303,8 +303,9 @@ class HREnvironment(MCPEnvironment):
         })
 
     def _step_impl(self, action: Action, **kwargs: Any) -> Observation:
-        return Observation(done=False, reward=0.0, metadata={
-            "error": "Use MCP tools: hire_candidate, get_team_summary, get_market_ledger"
+        score = self._compute_grader() if self._done else 0.01
+        return Observation(done=self._done, reward=score, metadata={
+            "error": "Use MCP tools: hire_candidate, get_team_summary, get_market_ledger", "grader_score": score
         })
 
     def step(self, action: Action, timeout_s: Optional[float] = None, **kwargs: Any) -> Observation:
@@ -453,7 +454,7 @@ class HREnvironment(MCPEnvironment):
         }
 
     def _error(self, message: str) -> dict:
-        return {"success": False, "message": message, "reward": 0.0, "done": True}
+        return {"success": False, "message": message, "reward": 0.0, "done": True, "grader_score": self._compute_grader()}
 
     def _candidate_summaries(self) -> list[dict]:
         return [
@@ -528,7 +529,7 @@ class HREnvironment(MCPEnvironment):
     # ── Deterministic grader ─────────────────────────────────────────────
 
     def _compute_grader(self) -> float:
-        """Final episode score in [0.0, 1.0]."""
+        """Final episode score in [0.01, 0.99]."""
         # Constraint satisfaction: team filled + avg intel >= threshold
         satisfied = 0
         for team in self._teams:
