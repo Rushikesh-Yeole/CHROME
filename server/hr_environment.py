@@ -555,4 +555,4 @@ class HREnvironment(MCPEnvironment):
             cost_ratio = hiring_completeness * spend_efficiency
 
         score = 0.30 * constraint_ratio + 0.60 * rev_ratio + 0.10 * cost_ratio
-        return round(max(0.0, min(1.0, score)), 4)
+        return round(max(0.0001, min(0.9999, score)), 4)
