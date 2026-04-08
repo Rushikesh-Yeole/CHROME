@@ -1,0 +1,15 @@
+openenv-core @ git+https://github.com/meta-pytorch/OpenEnv.git@v0.2.3
+fastapi>=0.115.0
+pydantic>=2.0.0
+uvicorn>=0.24.0
+websockets>=15.0.1
+fastmcp>=3.0.0
+
+[dev]
+pytest>=8.0.0
+pytest-asyncio>=0.21
+httpx>=0.28.0
+
+[inference]
+openai>=1.0.0
+python-dotenv>=1.0.0

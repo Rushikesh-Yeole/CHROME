@@ -1,0 +1,92 @@
+name: chrome_env
+version: "1.0.0"
+description: >
+  CHROME — Cognitive Human Resource Optimization & Market Engine.
+  Simulates a recruitment funnel with dynamic scarcity-based salary market,
+  multi-team hiring under budget/intelligence/revenue constraints,
+  team chemistry mechanics, and diminishing returns. 3 difficulty-tiered tasks.
+
+tasks:
+  - name: easy
+    task_id: 0
+    description: >
+      Hire for 5 teams (12 total hires) within ₹130L budget.
+      Static market, no chemistry or diminishing-return mechanics.
+      Tests basic budget management and intel-threshold awareness.
+    max_steps: 40
+    difficulty: easy
+
+  - name: medium
+    task_id: 1
+    description: >
+      Hire for 12 teams (40 total hires) within ₹420L budget.
+      Dynamic scarcity pricing, team chemistry, and diminishing returns enabled.
+      Agent must balance type composition across teams.
+    max_steps: 100
+    difficulty: medium
+
+  - name: hard
+    task_id: 2
+    description: >
+      Hire for 20 teams (74 total hires) within ₹740L budget.
+      Adds coupled cross-bucket scarcity and 6 deterministic market shocks
+      at steps 20/40/60/80/100/120. Requires planning around cascading price dynamics.
+    max_steps: 150
+    difficulty: hard
+
+action_space:
+  type: tool_call
+  description: >
+    Agent calls one of three JSON-formatted tools per turn.
+    Only hire_candidate consumes a step; the two query tools are free.
+  tools:
+    - name: hire_candidate
+      description: Hire a candidate for a team at the offered salary (must be >= market minimum).
+      parameters:
+        candidate_id: integer
+        team_name: string
+        offered_salary: float  # in Lakhs (₹L)
+      step_cost: 1
+
+    - name: get_team_summary
+      description: Returns full state — teams, candidates, budget, revenue, grader_score.
+      parameters: {}
+      step_cost: 0
+
+    - name: get_market_ledger
+      description: Returns current salary floor per intelligence bucket.
+      parameters: {}
+      step_cost: 0
+
+observation_space:
+  type: json
+  description: >
+    JSON dict returned after every tool call. Contains all fields
+    needed for the agent to plan its next action.
+  fields:
+    success: "bool — whether the action succeeded"
+    message: "str — human-readable feedback"
+    reward: "float — dense per-step reward signal"
+    done: "bool — whether the episode has ended"
+    budget_remaining: "float — remaining budget in ₹ Lakhs"
+    revenue_projection: "float — accumulated revenue so far"
+    action_count: "int — hire actions taken so far"
+    available_candidates: "list[dict] — pool with id, type, intel_score, current_min_salary"
+    teams: "list[dict] — each team's name, headcount, target, threshold, ideal_mix, hired_ids"
+    grader_score: "float in [0.0, 1.0] — current deterministic episode score"
+
+server:
+  port: 8000
+  health_check: /health
+  framework: fastapi
+
+tags:
+  - openenv
+  - hr
+  - recruiting
+  - optimization
+  - rl
+  - scarcity-market
+  - team-chemistry
+
+hardware: cpu-basic

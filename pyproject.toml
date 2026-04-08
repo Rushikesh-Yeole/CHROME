@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=45", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "chrome-env"
+version = "1.0.0"
+description = "CHROME — Cognitive Human Resource Optimization & Market Engine. OpenEnv environment with dynamic scarcity-based salary market."
+requires-python = ">=3.10"
+dependencies = [
+    "openenv-core @ git+https://github.com/meta-pytorch/OpenEnv.git@v0.2.3",
+    "fastapi>=0.115.0",
+    "pydantic>=2.0.0",
+    "uvicorn>=0.24.0",
+    "websockets>=15.0.1",
+    "fastmcp>=3.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.21",
+    "httpx>=0.28.0",
+]
+inference = [
+    "openai>=1.0.0",
+    "python-dotenv>=1.0.0",
+]
+
+[project.scripts]
+server = "hr.server.app:main"
+
+[tool.setuptools]
+include-package-data = true
+packages = ["hr", "hr.server"]
+package-dir = { "hr" = ".", "hr.server" = "server" }
