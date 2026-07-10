@@ -276,6 +276,7 @@ class HREnvironment(MCPEnvironment):
                 "remaining_supply": supply,
                 "current_min_salary": BASE_SALARIES[b],
             }
+        self._bucket_hires = {b: 0 for b in BUCKETS}
 
         self._history: list[dict] = []
         self._action_count = 0
@@ -303,7 +304,7 @@ class HREnvironment(MCPEnvironment):
         })
 
     def _step_impl(self, action: Action, **kwargs: Any) -> Observation:
-        score = self._compute_grader() if self._done else 0.01
+        score = self._compute_grader() if self._done else 0.0
         return Observation(done=self._done, reward=score, metadata={
             "error": "Use MCP tools: hire_candidate, get_team_summary, get_market_ledger", "grader_score": score
         })
@@ -382,21 +383,11 @@ class HREnvironment(MCPEnvironment):
         self._budget -= offered_salary
         team["current_headcount"] += 1
 
-        # Update ledger scarcity (primary bucket)
+        # Update supply and recompute all prices from deterministic counters.
         info = self._ledger[bucket]
         info["remaining_supply"] = max(0, info["remaining_supply"] - 1)
-        if self._dynamic_scarcity:
-            hired_count = info["initial_supply"] - info["remaining_supply"]
-            info["current_min_salary"] = info["base_min_salary"] * (1 + hired_count * SCARCITY_RATE)
-
-        # Coupled scarcity: adjacent buckets feel pressure
-        if self._coupled_scarcity:
-            for adj_bucket in ADJACENT_BUCKETS.get(bucket, []):
-                adj_info = self._ledger[adj_bucket]
-                adj_hired = adj_info["initial_supply"] - adj_info["remaining_supply"]
-                adj_info["current_min_salary"] = adj_info["base_min_salary"] * (
-                    1 + adj_hired * SCARCITY_RATE + SPILLOVER_RATE
-                )
+        self._bucket_hires[bucket] += 1
+        self._refresh_market_prices()
 
         # Revenue with diminishing returns and chemistry
         n = team["current_headcount"]  # already incremented
@@ -414,6 +405,7 @@ class HREnvironment(MCPEnvironment):
             "candidate_id": candidate_id, "team": team_name,
             "offered_salary": offered_salary, "intel_score": candidate["intel_score"],
             "type": candidate["type"],
+            "intel_bucket": bucket,
             "revenue_contribution": rev,
             "market_min_at_hire": min_sal,
         })
@@ -471,12 +463,31 @@ class HREnvironment(MCPEnvironment):
         if self._budget <= 0:
             self._done = True
             return
-        if self._budget < min(bucket["current_min_salary"] for bucket in self._ledger.values()):
-            self._done = True
-            return
         # All teams fully staffed
         if all(t["current_headcount"] >= t["target_headcount"] for t in self._teams):
             self._done = True
+            return
+        # Any candidate can be assigned to any unfilled team. If none is
+        # affordable, no legal state-changing action remains.
+        if not any(
+            self._ledger[c["intel_bucket"]]["current_min_salary"] <= self._budget
+            for c in self._candidates
+        ):
+            self._done = True
+
+    def _refresh_market_prices(self) -> None:
+        """Recompute prices from supply depletion and cumulative adjacent hires."""
+        for bucket, info in self._ledger.items():
+            pressure = 0.0
+            if self._dynamic_scarcity:
+                depleted = info["initial_supply"] - info["remaining_supply"]
+                pressure += depleted * SCARCITY_RATE
+            if self._coupled_scarcity:
+                pressure += sum(
+                    self._bucket_hires[adj] * SPILLOVER_RATE
+                    for adj in ADJACENT_BUCKETS.get(bucket, [])
+                )
+            info["current_min_salary"] = info["base_min_salary"] * (1 + pressure)
 
     def _apply_shocks(self) -> None:
         """Deterministic market shocks at fixed steps."""
@@ -486,9 +497,7 @@ class HREnvironment(MCPEnvironment):
         info = self._ledger[bucket]
         removed = min(count, info["remaining_supply"])
         info["remaining_supply"] = max(0, info["remaining_supply"] - removed)
-        if self._dynamic_scarcity:
-            hired_count = info["initial_supply"] - info["remaining_supply"]
-            info["current_min_salary"] = info["base_min_salary"] * (1 + hired_count * SCARCITY_RATE)
+        self._refresh_market_prices()
 
     # ── Greedy oracle ────────────────────────────────────────────────────
 
@@ -529,7 +538,7 @@ class HREnvironment(MCPEnvironment):
     # ── Deterministic grader ─────────────────────────────────────────────
 
     def _compute_grader(self) -> float:
-        """Final episode score in [0.01, 0.99]."""
+        """Final episode score in [0.0, 1.0]."""
         # Constraint satisfaction: team filled + avg intel >= threshold
         satisfied = 0
         for team in self._teams:
@@ -556,4 +565,4 @@ class HREnvironment(MCPEnvironment):
             cost_ratio = hiring_completeness * spend_efficiency
 
         score = 0.30 * constraint_ratio + 0.60 * rev_ratio + 0.10 * cost_ratio
-        return round(max(0.01, min(0.99, score)), 4)
+        return round(max(0.0, min(1.0, score)), 4)

@@ -1,229 +1,153 @@
-# CHROME
-### Cognitive Human Resource Optimization & Market Engine
+# CHROME: Cognitive Human Resource Optimization & Market Engine
 
-An OpenEnv-compliant RL environment for autonomous talent acquisition. An agent acts as a hiring manager across K teams, allocating a fixed budget in a **scarcity-coupled salary market** where every hire changes the cost of future hires — making the value function non-separable, the feasibility surface endogenous, and greedy policies provably suboptimal.
+[![Hugging Face Spaces](https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-Spaces-blue)](https://huggingface.co/spaces/rushisyeole/chrome-env)
+[![OpenEnv Compliance](https://img.shields.io/badge/OpenEnv-Compliant-green)](https://github.com/openenv/openenv)
+[![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://www.python.org/)
 
-```
-pip install -e ".[inference]"
-OPENAI_API_KEY=sk-... MODEL_NAME=gpt-4o python -m hr.inference
-```
+CHROME is an **OpenEnv-compliant Reinforcement Learning (RL) environment** and evaluation benchmark built to test how well AI agents can plan under real-world constraints.
 
----
-
-## Benchmarks
-
-Three agents. All scores deterministic, seed=42.
-
-| Task | Teams | Hires | Random | Greedy (revenue/₹) | Gemini 3.1 Flash Lite |
-|------|-------|-------|--------|--------------------|----------------------|
-| Easy | 5 | 12 | 0.154 | 0.843 | **0.809** |
-| Medium | 12 | 40 | 0.000 | 0.689 | **0.628** |
-| Hard | 20 | 74 | 0.075 | 0.543 | **0.516** |
-| **Avg** | | | **0.076** | **0.692** | **0.651** |
-
-The greedy baseline uses exact server-side chemistry and diminishing-return formulas, strict threshold enforcement, and a budget-reservation heuristic. It has perfect knowledge of the reward function. It still can't clear 0.55 on Hard. The Gemini traces show the same failure mode — both collapse because they can't model how their own hires inflate adjacent salary buckets two or three moves out. That gap is the point.
-
-Greedy: avg over 5 seeds (`rollout_demo.py`). LLM: `gemini-3.1-flash-lite-preview`, seed=42, temperature=0.1. Full traces in [`tests/inference_gemini_3.1_flash_lite.md`](tests/inference_gemini_3.1_flash_lite.md).
+In CHROME, an AI agent acts as a hiring manager tasked with building $K$ different teams from a pool of candidates under a strict budget. Unlike simple resource-matching puzzles, CHROME introduces **dynamic market scarcity** and **team chemistry dynamics**. Decisions made in the early steps directly alter the salary requirements and feasibility of all future steps, making simple "greedy" choice strategies fail.
 
 ---
 
-## Why standard policies fail here
+## Core Leaderboard
 
-**The base problem is NP-hard.** Assigning N candidates to K teams under per-team headcount and intel thresholds within a budget is a variant of multi-dimensional bin packing. CHROME makes three structural changes that rule out even approximate greedy solutions.
+The controlled **Core** track evaluates LLMs on a standardized, deterministic testbed. This benchmark measures multi-step planning, budget control, and how agents react to sudden market changes.
 
-**1 — Endogenous costs.**
-The salary market is a function of your own action history. Hiring candidate X from bucket `k` inflates the price of every remaining candidate in that bucket by `8%` (and adjacent buckets by `3%` in Hard mode). The optimal plan at step 1 is not the optimal plan at step 10, because you changed the landscape. This puts it closer to **online combinatorial optimization with endogenous costs** than classical NP-hard assignment — a regime where even an oracle with full lookahead must simulate execution to plan.
+<!-- CHROME_CORE_RESULTS_START -->
+| Model | Avg | Easy | Medium | Hard | Cost | Trace |
+|---|---:|---:|---:|---:|---:|---|
+| Heuristic Greedy baseline | 0.692 | 0.843 | 0.689 | 0.543 | $0.0000 | `rollout_demo.py` |
+| `google/gemini-3-flash-preview` | 0.671 | 0.817 | 0.665 | 0.531 | $0.5854 | [trace](benchmark_results/core/google-gemini-3-flash-preview.md) |
+| `google/gemini-2.5-flash` | 0.664 | 0.799 | 0.688 | 0.506 | $0.2723 | [trace](benchmark_results/core/google-gemini-2-5-flash.md) |
+| `google/gemini-3.1-flash-lite` | 0.634 | 0.788 | 0.636 | 0.477 | $0.2016 | [trace](benchmark_results/core/google-gemini-3-1-flash-lite.md) |
+| `meta-llama/llama-3.3-70b-instruct` | 0.613 | 0.841 | 0.603 | 0.395 | $0.5044 | [trace](benchmark_results/core/meta-llama-llama-3-3-70b-instruct.md) |
+| `minimax/minimax-m3` | 0.534 | 0.655 | 0.618 | 0.329 | $1.4064 | [trace](benchmark_results/core/minimax-minimax-m3.md) |
+| `google/gemini-3.5-flash` | FAIL | 0.772 | 0.746 | FAIL | $1.8079 | [trace](benchmark_results/core/google-gemini-3-5-flash.md) |
+<!-- CHROME_CORE_RESULTS_END -->
 
-**2 — Non-separable value function.**
-Revenue from a hire depends on the current team composition (chemistry) and team size (diminishing returns). You cannot score candidates independently. The marginal value of a Senior hire is entirely different depending on who's already on the team — and this dependency compounds across 20 teams simultaneously. Local search and greedy degrade badly in supermodular regimes; improving one team frequently worsens the global objective.
-
-```python
-chemistry = 1.0 - L1_distance(actual_type_mix, ideal_type_mix) / 2.0
-effective_revenue = base_revenue * (0.5 + 0.5 * chemistry)
-revenue_contribution = effective_revenue / sqrt(team_size)   # diminishing returns
-```
-
-**3 — No dominant strategy.**
-The grader weights constraint satisfaction (30%), revenue ratio (60%), and cost efficiency (10%). These objectives genuinely conflict. Front-loading high-intel candidates maximises revenue but exhausts the budget before all teams are filled. Filling every team regardless of composition satisfies constraints but leaves revenue on the table. The hard task has 6 deterministic market shocks at fixed steps — at which point a policy that hasn't modelled market state is just reacting.
-
----
-
-## Environment
-
-### Action space (MCP tools)
-
-| Tool | Parameters | Step cost |
-|------|-----------|-----------|
-| `hire_candidate` | `candidate_id`, `team_name`, `offered_salary` | 1 |
-| `get_team_summary` | — | 0 |
-| `get_market_ledger` | — | 0 |
-
-Free observation tools mean an agent can reason arbitrarily before committing. Only hires consume the step budget.
-
-### Observation space
-
-Every tool call returns a unified JSON observation:
-
-| Field | Type |
-|-------|------|
-| `success` | bool |
-| `reward` | float — dense per-step signal |
-| `done` | bool |
-| `budget_remaining` | float (₹ Lakhs) |
-| `revenue_projection` | float |
-| `action_count` | int |
-| `available_candidates` | list[dict] — id, type, intel, current_min_salary |
-| `grader_score` | float `[0.0, 1.0]` — live episode estimate |
-
-### Market dynamics
-
-Five intelligence buckets. Price after N hires from bucket k:
-
-| Bucket | Base (₹L) | Price formula |
-|--------|-----------|--------------|
-| 0–20 | 3.0 | `3.0 × (1 + N × 0.08)` |
-| 21–40 | 5.0 | same |
-| 41–60 | 8.0 | same |
-| 61–80 | 12.0 | same |
-| 81–100 | 18.0 | same |
-
-Hard mode adds cross-bucket coupling: every hire in bucket k raises `k±1` by 3%.
-
-### Reward (dense, per-step)
-
-```
-Successful hire:
-  +0.50 × (intel / 100) × chemistry_multiplier
-  +0.40  intel ≥ team threshold
-  -0.30  intel < team threshold
-  +0.20  salary within 5% of market minimum
-  +1.00  hire completes the team
-  -0.05  per action (time pressure)
-
-Failed hire:
-  -0.25  salary below market minimum
-  -0.55  over budget
-  -0.10  invalid target
-```
-
-### Grader (deterministic)
-
-```
-score = 0.30 × constraint_satisfaction
-      + 0.60 × (actual_revenue / oracle_revenue)
-      + 0.10 × (hiring_completeness × spend_efficiency)
-```
-
-The oracle ceiling is computed at static prices — deliberately unreachable under dynamic scarcity, consistent with standard RL benchmarking practice. Same seed, same actions → identical score, guaranteed.
-
-### Task progression
-
-| Task | Teams | Candidates | Budget | Max steps | Active mechanics |
-|------|-------|-----------|--------|-----------|-----------------|
-| Easy (0) | 5 | 100 | ₹130L | 40 | Static market |
-| Medium (1) | 12 | 250 | ₹420L | 100 | Dynamic scarcity + chemistry + diminishing returns |
-| Hard (2) | 20 | 500 | ₹740L | 150 | All above + coupled scarcity + 6 market shocks |
+> All core evals use standardized environment settings.
 
 ---
 
-## Architecture
+## Why Simple Strategies Fail Here
 
-```
-CHROME/
-├── __init__.py              # HREnv, HRAction, HRObservation
-├── models.py                # Pydantic contracts
-├── client.py                # MCPToolClient (sync + async)
-├── inference.py             # LLM baseline runner
-├── openenv.yaml             # OpenEnv spec manifest
-├── Dockerfile               # HF Spaces entry point
-├── server/
-│   ├── hr_environment.py    # Market mechanics, chemistry, grader
-│   ├── app.py               # FastAPI / step / reset / state
-│   └── Dockerfile
-├── examples/
-│   └── rollout_demo.py      # Greedy vs random policy comparison
-└── tests/
-    ├── test_hr_env.py
-    └── inference_gemini_3.1_flash_lite.md
-```
+Standard hiring baselines or greedy models degrade quickly in CHROME because of three distinct environment mechanics:
+
+### 1. Dynamic Salary Scarcity (Your actions change the market)
+The salary market responds to the agent's choices. Hiring a candidate from a specific skill bucket depletes the supply, driving up the minimum wage requirement for all remaining candidates in that bucket (and adjacent buckets in Hard mode):
+
+$$\text{Salary Floor} = \text{Base Salary} \times (1.0 + 0.08 \times \text{Hires} + 0.03 \times \text{Adjacent Hires})$$
+
+* **Base Salary**: Base minimum salary for a candidate's skill tier (ranging from ₹3L to ₹18L).
+* **Hires**: Total candidates hired out of that specific skill tier.
+* **Adjacent Hires**: Hires made in neighboring skill tiers (reflecting cross-industry wage inflation).
+
+Because hiring someone makes everyone else in their field more expensive, early high-value hires compress the remaining budget and inflate future candidate costs. Agents must balance spending early vs. saving for later.
+
+### 2. Team Chemistry & Diminishing Returns (Candidates aren't isolated)
+You cannot evaluate candidates in isolation. A hire's revenue contribution depends on who is already on the team (Chemistry) and experiences natural diminishing returns as the team grows:
+
+$$\text{Revenue} = \frac{\text{Multiplier}}{\sqrt{\text{Team Size}}} \times \sum_{c} \left( \text{Intel}_c \times (0.5 + 0.5 \times \text{Chemistry}) \right)$$
+
+* **Team Size**: Headcount currently hired to the team (enforcing diminishing returns via the square root).
+* **Intel**: The candidate's capability score (0–100).
+* **Chemistry**: Evaluated by comparing the hired roles to the ideal team mix:
+
+$$\text{Chemistry} = 1.0 - \frac{1}{2} \sum_{\text{Role}} | \text{Actual}\% - \text{Ideal}\% |$$
+
+Where `Actual%` is the proportion of Junior, Mid, Senior, or Lead engineers currently hired, and `Ideal%` is the target role mix. The value of adding a Senior engineer shifts depending on whether the team already has enough Juniors or Leads.
+
+### 3. Exogenous Market Shocks (Surprise attrition)
+In Hard Mode, the environment triggers competitor "poaching" campaigns at fixed steps (e.g., step 20, 40, 60...). These shocks remove high-scoring candidates directly from the pool, driving up scarcity costs without the agent's intervention. 
+
+Agents that do not maintain budget buffers or fail to secure critical roles before these milestones run out of resources before filling their teams.
 
 ---
 
-## Getting started
+## Environment Interface (MCP Tools)
 
+CHROME runs natively on the **Model Context Protocol (MCP)**, exposing environment controls as structured tools.
+
+### Available Actions
+
+| MCP Tool | Parameters | Step Cost | Description |
+|:---|:---|:---:|:---|
+| `hire_candidate` | `candidate_id` (int)<br>`team_name` (str)<br>`offered_salary` (float) | **1** | Hires the candidate for the team. Salary must meet the current market minimum. |
+| `get_team_summary` | — | **0** | View headcount, roles, revenue projections, and available candidates. |
+| `get_market_ledger` | — | **0** | Check the live salary floors for all skill tiers. |
+
+*Note: Free observation tools allow agents to execute arbitrary planning, reasoning, or lookahead steps before committing to a permanent state change.*
+
+---
+
+## Episode Grader & Objective Function
+
+At the end of an episode, the agent is scored on a scale of `[0.0, 1.0]` based on a balance of three goals:
+
+$$\text{Grader Score} = 0.3 \times \text{Constraints} + 0.6 \times \text{Revenue Ratio} + 0.1 \times \text{Spend Efficiency}$$
+
+1. **Constraints (30%)**: Percentage of teams fully staffed (headcount target met) with an average team intelligence score above the required threshold.
+2. **Revenue Ratio (60%)**: Revenue generated compared to the **Aspirational Oracle Revenue** (a theoretical ceiling calculated at static prices).
+3. **Spend Efficiency (10%)**: Incentivizes staffing the teams without overbidding:
+$$\text{Spend Efficiency} = \text{Hiring Completeness} \times \text{Average } \left( \frac{\text{Market Min}}{\text{Paid Salary}} \right)$$
+
+---
+
+## Task Difficulty Levels
+
+| Dimension | Easy (0) | Medium (1) | Hard (2) |
+|:---|:---:|:---:|:---:|
+| **Teams ($K$)** | 5 | 12 | 20 |
+| **Candidates ($N$)** | 100 | 250 | 500 |
+| **Budget** | ₹130L | ₹420L | ₹740L |
+| **Max Steps** | 40 | 100 | 150 |
+| **Dynamic Scarcity** | Static | Active (0.08) | Active (0.08) |
+| **Coupled Scarcity** | Disabled | Disabled | Active (0.03) |
+| **Team Chemistry** | Disabled | Enabled | Enabled |
+| **Market Shocks** | None | None | 6 Deterministic Shocks |
+
+---
+
+## Getting Started
+
+### Installation
+Clone the repository and install dependencies:
 ```bash
-git clone https://github.com/rushisyeole/CHROME
+git clone https://github.com/rushisyeole/CHROME.git
 cd CHROME
 pip install -e ".[dev]"
+```
 
-# Server
+### Running the Environment Server
+Start the FastAPI server, which exposes the MCP tools over HTTP:
+```bash
 uvicorn hr.server.app:app --host 0.0.0.0 --port 8000 --reload
+```
 
-# Tests
+### Run Tests
+```bash
 pytest tests/ -v
+```
 
-# Policy comparison (greedy vs random, 5 seeds)
+### Baseline Rollouts
+Compare a simple heuristic greedy policy against a random policy over 5 seeds:
+```bash
 python -m hr.examples.rollout_demo
 ```
 
-### Client
+---
 
-```python
-from hr.client import HREnv
+## Evaluating LLM Agents on CHROME
 
-with HREnv(base_url="http://localhost:8000").sync() as env:
-    env.reset(task_id=2, seed=42)                    # Hard mode
-
-    ledger = env.call_tool("get_market_ledger")      # free
-    state  = env.call_tool("get_team_summary")       # free
-
-    result = env.call_tool(
-        "hire_candidate",
-        candidate_id=42,
-        team_name="Engineering",
-        offered_salary=12.6,                         # must be >= market minimum
-    )
-    # {"success": True, "reward": 1.26, "done": False, "grader_score": 0.08, ...}
-```
-
-### LLM baseline
+To evaluate an LLM agent, run the inference runner. Ensure your `OPENROUTER_API_KEY` is exported:
 
 ```bash
 pip install -e ".[inference]"
 
-# OpenAI-compatible
-OPENAI_API_KEY=sk-...  API_BASE_URL=https://api.openai.com/v1  MODEL_NAME=gpt-4o \
-python -m hr.inference
+# Run a single evaluation run (e.g. Gemini 3.5 Flash)
+OPENROUTER_API_KEY=sk-or-... MODEL_NAME=google/gemini-3.5-flash python -m hr.inference
 
-# HuggingFace router
-HF_TOKEN=hf_...  MODEL_NAME=meta-llama/Llama-3.1-8B-Instruct \
-python -m hr.inference
+# Run the complete CHROME-Core benchmark suite
+OPENROUTER_API_KEY=sk-or-... python -m hr.benchmark
 ```
-
-Structured stdout:
-```
-[START] task=hard env=chrome model=gpt-4o
-[STEP]  step=1 action=hire_candidate(42,'Engineering',12.6) reward=1.26 done=false error=null
-[END]   success=true steps=50 score=0.516 rewards=1.26,0.68,...
-```
-
-### Docker
-
-```bash
-docker build -t chrome-env .
-docker run -p 8000:8000 chrome-env
-```
-
-Live on HuggingFace Spaces: [huggingface.co/spaces/rushisyeole/chrome-env](https://huggingface.co/spaces/rushisyeole/chrome-env)
-
----
-
-## Roadmap
-
-**Multi-agent.** The current environment has one agent controlling all 20 teams. The natural extension is K specialized agents — one per team or per market tier — with a coordinator. This creates a non-cooperative game: each agent's hires inflate prices for the others, introducing competition over shared candidate pools that doesn't exist in the single-agent version. The market coupling already encodes the game-theoretic structure; adding per-agent budgets and independent episode scores is the primary thing needed.
-
-**RL training loop.** The dense reward signal and fully deterministic resets are designed for policy gradient training. The obvious next step is a PPO or GRPO loop against all three difficulty levels and measuring whether a learned policy can outperform the greedy ceiling — specifically on Hard, where the greedy degrades most sharply. The oracle revenue gap on Hard (~0.46 headroom above greedy) is wide enough that a learned policy has real room to improve.
-
-**Market calibration.** The current scarcity formula (`8% per hire from bucket`) is hand-tuned. Fitting these parameters to real compensation data (e.g., Glassdoor or Levels.fyi salary percentiles) would make CHROME a closer proxy for actual recruiting dynamics and more useful as an evaluation surface for applied HR automation research.
-
----

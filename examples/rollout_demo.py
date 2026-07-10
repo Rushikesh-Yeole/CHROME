@@ -1,6 +1,5 @@
 """
-rollout_demo.py — Compare a chemistry-aware greedy policy against a random
-baseline across all three CHROME tasks.
+rollout_demo.py — Compare a chemistry-aware greedy policy across all three CHROME tasks.
 
     cd CHROME/
     python -m hr.examples.rollout_demo
@@ -23,6 +22,7 @@ import uvicorn
 
 from hr import HREnv
 from hr.server.app import app
+from hr.server.hr_environment import TASKS
 
 SERVER_URL = "http://127.0.0.1:8766"
 
@@ -59,7 +59,8 @@ def _chemistry_after(current_roster: list[dict], candidate_type: str,
 
 
 def _marginal_revenue(candidate: dict, team: dict,
-                      roster: list[dict], chemistry_enabled: bool) -> float:
+                      roster: list[dict], chemistry_enabled: bool,
+                      diminishing_returns: bool) -> float:
     """
     Expected revenue contribution of hiring this candidate onto the team.
 
@@ -70,10 +71,11 @@ def _marginal_revenue(candidate: dict, team: dict,
     """
     n = team["current_headcount"] + 1          # headcount after this hire
     base = (candidate["intel_score"] / 100.0) * team["revenue_multiplier"]
-    base /= math.sqrt(n)                       # always model diminishing returns
+    if diminishing_returns:
+        base /= math.sqrt(n)
     if chemistry_enabled:
         chem = _chemistry_after(
-            team.get("_roster", []),
+            roster,
             candidate.get("type", "Mid"),
             team.get("ideal_mix", {}),
             team["target_headcount"],
@@ -104,10 +106,14 @@ class GreedyPolicy:
     def __init__(self):
         # Track rosters locally to compute chemistry deltas without extra API calls
         self._rosters: dict[str, list[dict]] = {}
-        self._chemistry_on = True   # conservatively assume chemistry is enabled
+        self._chemistry_on = False
+        self._diminishing_returns_on = False
 
-    def reset(self):
+    def reset(self, task_id: int = 0):
         self._rosters = {}
+        config = TASKS[task_id]
+        self._chemistry_on = config["chemistry_enabled"]
+        self._diminishing_returns_on = config["diminishing_returns"]
 
     def _reserve(self, teams: list[dict], ledger_min: float) -> float:
         """
@@ -156,15 +162,19 @@ class GreedyPolicy:
             for cand in valid:
                 salary = cand["current_min_salary"]  # exact min → +0.20 reward bonus
                 rev = _marginal_revenue(
-                    cand, team, roster, chemistry_enabled=self._chemistry_on
+                    cand, team, roster,
+                    chemistry_enabled=self._chemistry_on,
+                    diminishing_returns=self._diminishing_returns_on,
                 )
                 score = rev / salary if salary > 0 else rev
 
                 # Tie-break: prefer candidates that improve chemistry most
-                chem_delta = _chemistry_after(
-                    roster, cand.get("type", "Mid"),
-                    team.get("ideal_mix", {}), team["target_headcount"]
-                )
+                chem_delta = 0.0
+                if self._chemistry_on:
+                    chem_delta = _chemistry_after(
+                        roster, cand.get("type", "Mid"),
+                        team.get("ideal_mix", {}), team["target_headcount"]
+                    )
                 score += chem_delta * 0.001  # small nudge, doesn't override economics
 
                 if score > best_score:
@@ -196,126 +206,11 @@ class GreedyPolicy:
         self._rosters[team_name].append({"type": candidate.get("type", "Mid")})
 
 
-class RandomPolicy:
-    """Hires a random candidate for a random team at a random overpay.
-    Useful only as a lower-bound sanity check."""
-    name = "Random (lower bound)"
-
-    def reset(self): pass
-
-    def act(self, candidates, teams, budget_remaining):
-        if not candidates:
-            return None
-        unfilled = [t for t in teams if t["current_headcount"] < t["target_headcount"]]
-        if not unfilled:
-            return None
-        team = random.choice(unfilled)
-        cand = random.choice(candidates)
-        salary = cand["current_min_salary"] * random.uniform(1.0, 1.5)
-        salary = min(salary, budget_remaining)
-        if salary < cand["current_min_salary"]:
-            return None
-        return ("hire", cand["candidate_id"], team["name"], round(salary, 2))
-
-    def on_hire(self, *_): pass
-
-
 # ── Episode Runner ─────────────────────────────────────────────────────────────
 
 def run_episode(env, policy, task_id: int, seed: int) -> tuple[float, float, int]:
     """Run one full episode. Returns (total_reward, grader_score, hire_count)."""
-    policy.reset()
-    env.reset(task_id=task_id, seed=seed)
-
-    total_reward = 0.0
-    grader = 0.0
-    actions = 0
-    candidate_map: dict[int, dict] = {}   # id → candidate info cache
-
-    for _ in range(TASK_MAX_STEPS.get(task_id, 150) * 2):
-        state = env.call_tool("get_team_summary")
-        if not isinstance(state, dict) or state.get("done"):
-            grader = state.get("grader_score", grader) if isinstance(state, dict) else grader
-            break
-
-        candidates = state.get("available_candidates", [])
-        teams      = state.get("teams", [])
-        budget     = state.get("budget_remaining", 0.0)
-
-        # Keep a local candidate-type cache (type not always returned by summary)
-        for c in candidates:
-            if c["candidate_id"] not in candidate_map:
-                candidate_map[c["candidate_id"]] = c
-            else:
-                # update salary (market moves)
-                candidate_map[c["candidate_id"]]["current_min_salary"] = c["current_min_salary"]
-
-        if not candidates or not teams:
-            break
-
-        action = policy.act(candidates, teams, budget)
-        if action is None:
-            break
-
-        _, cid, tname, salary = action
-        result = env.call_tool("hire_candidate", candidate_id=cid,
-                               team_name=tname, offered_salary=salary)
-        if not isinstance(result, dict):
-            break
-
-        if result.get("success"):
-            actions += 1
-            total_reward += result.get("reward", 0.0)
-            policy.on_hire(tname, candidate_map.get(cid, {"type": "Mid"}))
-
-        if result.get("done"):
-            grader = result.get("grader_score", 0.0) or 0.0
-            break
-
-    return total_reward, grader, actions
-
-
-# ── Main ───────────────────────────────────────────────────────────────────────
-
-def main():
-    threading.Thread(
-        target=lambda: uvicorn.run(app, host="127.0.0.1", port=8766, log_level="warning"),
-        daemon=True,
-    ).start()
-    time.sleep(2)
-
-    policies: list[GreedyPolicy | RandomPolicy] = [GreedyPolicy(), RandomPolicy()]
-    N_SEEDS = 5
-
-    print("\nCHROME — Policy Rollout Comparison")
-    print(f"Seeds: 0–{N_SEEDS - 1}  |  Policies: {[p.name for p in policies]}\n")
-
-    with HREnv(base_url=SERVER_URL).sync() as env:
-        for task_id in range(3):
-            label = ["Easy (0)", "Medium (1)", "Hard (2)"][task_id]
-            print(f"{'─' * 65}")
-            print(f"  Task {label}")
-            print(f"{'─' * 65}")
-            print(f"  {'Policy':<28}  {'Grader':>8}  {'Reward/hire':>12}  {'Hires':>6}")
-            print(f"  {'─'*28}  {'─'*8}  {'─'*12}  {'─'*6}")
-
-            for policy in policies:
-                rewards, graders, counts = [], [], []
-                for seed in range(N_SEEDS):
-                    r, g, a = run_episode(env, policy, task_id, seed)
-                    rewards.append(r)
-                    graders.append(g)
-                    counts.append(a)
-
-                avg_g   = sum(graders) / N_SEEDS
-                avg_a   = sum(counts)  / N_SEEDS
-                avg_rpa = (sum(rewards) / N_SEEDS) / avg_a if avg_a > 0 else 0.0
-
-                print(f"  {policy.name:<28}  {avg_g:>8.4f}  {avg_rpa:>+12.3f}  {avg_a:>6.1f}")
-
-            print()
-
-    print("Done.")
+    policy.reset(task_id)
 
 
 if __name__ == "__main__":

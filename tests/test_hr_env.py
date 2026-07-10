@@ -222,8 +222,8 @@ class TestGrader:
                                    candidate_id=c["candidate_id"],
                                    team_name="Engineering",
                                    offered_salary=20.0)
+            hire_score = result.get("grader_score", hire_score) or hire_score
             if result.get("done"):
-                hire_score = result.get("grader_score", 0) or 0
                 break
 
         # Hiring agent should score >= idle agent

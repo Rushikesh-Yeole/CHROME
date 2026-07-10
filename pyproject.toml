@@ -29,6 +29,7 @@ inference = [
 
 [project.scripts]
 server = "hr.server.app:main"
+chrome-benchmark = "hr.benchmark:main"
 
 [tool.setuptools]
 include-package-data = true
